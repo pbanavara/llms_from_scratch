@@ -63,20 +63,27 @@ try:
 except ImportError:
     _TRITON_OK = False
 
-# CUTE-DSL: requires nvidia-cutlass >= 3.6 built with SM100 support
+# CUTE-DSL: requires nvidia-cutlass with SM100 support
+_CUTE_IMPORT_ERROR: str = ""
 try:
-    import cutlass.cute as cute
-    from cutlass.cute.runtime import from_dlpack as cute_from_dlpack
-    # Verify SM100 MMA atoms are present (added in CUTLASS 3.6)
+    import cutlass.cute as cute                                    # noqa: F401
+    from cutlass.cute.runtime import from_dlpack as cute_from_dlpack  # noqa: F401
+    # Import SM100 atoms — names confirmed by running cutlass_probe.py.
+    # If this block fails, run:  python cutlass_probe.py
+    # and update the names below to match your CUTLASS version.
     from cutlass.cute.arch import (          # noqa: F401
         SM100_TMA_LOAD,
         SM100_TMA_STORE,
-        SM100_MMA_F32F32F32F32_SS_1CTA,      # tcgen05.mma: SRAM × SRAM → TMEM
+        SM100_MMA_F32F32F32F32_SS_1CTA,
         SM100_TMEM_ALLOC,
     )
-    _CUTE_OK = True and _IS_B200
-except Exception:
+    _CUTE_OK = _IS_B200
+except Exception as _e:
     _CUTE_OK = False
+    _CUTE_IMPORT_ERROR = str(_e)
+    if _IS_B200:
+        print(f"[qwen3_5_cutedsl] CUTE-DSL unavailable: {_e}")
+        print("[qwen3_5_cutedsl] Run `python cutlass_probe.py` to find correct atom names.")
 
 
 # ── utilities ──────────────────────────────────────────────────────────────
