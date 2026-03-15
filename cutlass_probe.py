@@ -1,284 +1,226 @@
 """
-Probe available CUTLASS 4.x Python DSL APIs for SM100 (B200).
-Run:  python cutlass_probe.py
+CUTLASS 4.4.1 Python DSL — targeted probe for launch syntax + smem.
+Run:  python cutlass_probe.py 2>&1 | tee probe_out.txt
 """
-import sys
-import importlib
-import inspect
+import sys, importlib, inspect, os, pathlib
 
 SEP = "─" * 70
+def section(t): print(f"\n{SEP}\n  {t}\n{SEP}")
+def try_import(p):
+    try: m = importlib.import_module(p); print(f"  ✓  {p}"); return m
+    except Exception as e: print(f"  ✗  {p}  ({e})"); return None
 
-def section(title):
-    print(f"\n{SEP}\n  {title}\n{SEP}")
-
-def try_import(dotpath):
-    try:
-        mod = importlib.import_module(dotpath)
-        print(f"  ✓  {dotpath}")
-        return mod
-    except Exception as e:
-        print(f"  ✗  {dotpath}  ({e})")
-        return None
-
-def grep_attrs(mod, *keywords, prefix="", show_sig=False):
-    if mod is None:
-        return
-    kws = [k.lower() for k in keywords]
-    for a in sorted(dir(mod)):
-        if any(k in a.lower() for k in kws):
-            try:
-                val = getattr(mod, a)
-                sig = ""
-                if show_sig:
-                    try:
-                        sig = f"  sig={inspect.signature(val)}"
-                    except Exception:
-                        pass
-                print(f"    {prefix}{a}  — {type(val).__name__}{sig}")
-            except Exception:
-                print(f"    {prefix}{a}  — <error>")
-
-def all_attrs(mod, prefix=""):
-    if mod is None:
-        return
-    for a in sorted(dir(mod)):
-        if a.startswith("_"):
-            continue
-        try:
-            val = getattr(mod, a)
-            print(f"    {prefix}{a}  — {type(val).__name__}")
-        except Exception:
-            print(f"    {prefix}{a}  — <error>")
-
-
-# ── versions ──────────────────────────────────────────────────────────────
-section("Versions")
 import torch
-print(f"  Python  : {sys.version.split()[0]}")
-print(f"  PyTorch : {torch.__version__}")
-if torch.cuda.is_available():
-    maj, minor = torch.cuda.get_device_capability()
-    print(f"  GPU     : {torch.cuda.get_device_name()}  SM{maj}{minor}")
-try:
-    import cutlass; print(f"  CUTLASS : {cutlass.__version__}")
-except Exception as e:
-    print(f"  CUTLASS : FAILED — {e}"); sys.exit(1)
-try:
-    import triton; print(f"  Triton  : {triton.__version__}")
-except Exception:
-    print("  Triton  : not installed")
+import cutlass
+import cutlass.cute as cute
+from cutlass.cute.runtime import from_dlpack
 
+PKG = pathlib.Path(cutlass.__file__).parent
+DSL = pathlib.Path(cutlass.__file__).parent.parent.parent  # nvidia_cutlass_dsl root
 
-# ── tcgen05.mma submodule ──────────────────────────────────────────────────
-section("cutlass.cute.nvgpu.tcgen05.mma — full contents")
-tcgen05_mma = try_import("cutlass.cute.nvgpu.tcgen05.mma")
-all_attrs(tcgen05_mma, prefix="  mma.")
+# ── 1.  Find & read example .py files ────────────────────────────────────
+section("Find example files (gemm / sm100 / blackwell / kernel)")
+examples_found = []
+for root, dirs, files in os.walk(DSL):
+    dirs[:] = [d for d in dirs if not d.startswith(".")]
+    for f in files:
+        if f.endswith(".py") and any(k in (root+f).lower() for k in
+                ["example", "gemm", "sm100", "blackwell", "tutorial", "sample"]):
+            examples_found.append(os.path.join(root, f))
 
+for p in sorted(examples_found)[:20]:
+    print(f"  {p}")
 
-# ── tcgen05.copy submodule ─────────────────────────────────────────────────
-section("cutlass.cute.nvgpu.tcgen05.copy — full contents")
-tcgen05_copy = try_import("cutlass.cute.nvgpu.tcgen05.copy")
-all_attrs(tcgen05_copy, prefix="  copy.")
-
-
-# ── arch.tmem submodule ────────────────────────────────────────────────────
-section("cutlass.cute.arch.tmem — full contents")
-arch_tmem = try_import("cutlass.cute.arch.tmem")
-all_attrs(arch_tmem, prefix="  tmem.")
-
-
-# ── MmaF16BF16Op / MmaTF32Op constructors ────────────────────────────────
-section("tcgen05 MMA Op constructors and subclasses")
-try:
-    from cutlass.cute.nvgpu import tcgen05
-
-    for name in ["MmaF16BF16Op", "MmaTF32Op", "MmaFP8Op"]:
-        cls = getattr(tcgen05, name, None)
-        if cls is None:
-            print(f"  ✗  {name} not found")
-            continue
-        print(f"\n  {name}:")
-        # list concrete subclasses if it's ABCMeta
-        try:
-            subs = cls.__subclasses__()
-            if subs:
-                for s in subs:
-                    print(f"    subclass: {s.__name__}  module={s.__module__}")
-                    try:
-                        print(f"      sig: {inspect.signature(s)}")
-                    except Exception:
-                        pass
-            else:
-                print(f"    no subclasses found")
-                try:
-                    print(f"    sig: {inspect.signature(cls)}")
-                except Exception:
-                    pass
-        except Exception as e:
-            print(f"    error: {e}")
-
-    # Also list all concrete MmaOp subclasses from tcgen05.mma module
-    print("\n  Concrete Tcgen05MmaOp subclasses (from tcgen05.mma):")
-    import cutlass.cute.nvgpu.tcgen05.mma as _mma_mod
-    for a in sorted(dir(_mma_mod)):
-        val = getattr(_mma_mod, a)
-        if isinstance(val, type):
-            print(f"    {a}")
-            try:
-                print(f"      sig: {inspect.signature(val)}")
-            except Exception:
-                pass
-
-except Exception as e:
-    print(f"  ERROR: {e}")
-
-
-# ── arch.alloc_tmem signature ─────────────────────────────────────────────
-section("arch.alloc_tmem / retrieve_tmem_ptr signatures")
-try:
-    from cutlass.cute.arch import alloc_tmem, retrieve_tmem_ptr, dealloc_tmem
-    for fn in [alloc_tmem, retrieve_tmem_ptr, dealloc_tmem]:
-        try:
-            print(f"  {fn.__name__}: {inspect.signature(fn)}")
-        except Exception as e:
-            print(f"  {fn.__name__}: sig unavailable ({e})")
-            # Try docstring
-            if fn.__doc__:
-                print(f"    doc: {fn.__doc__[:200]}")
-except Exception as e:
-    print(f"  ERROR: {e}")
-
-
-# ── cpasync TMA make_tiled_tma_atom signature ─────────────────────────────
-section("cpasync.make_tiled_tma_atom signature")
-try:
-    from cutlass.cute.nvgpu.cpasync import make_tiled_tma_atom, tma_partition
-    for fn in [make_tiled_tma_atom, tma_partition]:
-        try:
-            print(f"  {fn.__name__}: {inspect.signature(fn)}")
-        except Exception as e:
-            print(f"  {fn.__name__}: sig unavailable ({e})")
-            if fn.__doc__:
-                print(f"    doc: {fn.__doc__[:300]}")
-except Exception as e:
-    print(f"  ERROR: {e}")
-
-
-# ── tcgen05.make_s2t_copy / make_tmem_copy ────────────────────────────────
-section("tcgen05 copy helpers")
-try:
-    from cutlass.cute.nvgpu import tcgen05
-    for fn_name in ["make_s2t_copy", "make_tmem_copy", "get_tmem_copy_properties",
-                    "make_umma_smem_desc", "tile_to_mma_shape"]:
-        fn = getattr(tcgen05, fn_name, None)
-        if fn is None:
-            print(f"  ✗  {fn_name}")
-            continue
-        try:
-            print(f"  {fn_name}: {inspect.signature(fn)}")
-        except Exception as e:
-            print(f"  {fn_name}: sig unavailable ({e})")
-            if fn.__doc__:
-                print(f"    doc: {fn.__doc__[:300]}")
-except Exception as e:
-    print(f"  ERROR: {e}")
-
-
-# ── cute.make_tiled_mma signature ─────────────────────────────────────────
-section("cute.make_tiled_mma / cute.gemm signatures")
-try:
-    import cutlass.cute as cute
-    for fn_name in ["make_tiled_mma", "gemm", "make_tiled_copy", "copy",
-                    "make_rmem_tensor", "make_fragment", "local_tile"]:
-        fn = getattr(cute, fn_name, None)
-        if fn is None:
-            print(f"  ✗  {fn_name}")
-            continue
-        try:
-            print(f"  {fn_name}: {inspect.signature(fn)}")
-        except Exception as e:
-            print(f"  {fn_name}: sig unavailable ({e})")
-            if fn.__doc__:
-                print(f"    doc: {fn.__doc__[:300]}")
-except Exception as e:
-    print(f"  ERROR: {e}")
-
-
-# ── @cute.jit launch syntax ───────────────────────────────────────────────
-section("@cute.jit launch syntax probe")
-try:
-    import cutlass.cute as cute
-    from cutlass.cute.runtime import from_dlpack
-    import inspect
-
-    # Inspect jit decorator
-    print(f"  cute.jit type: {type(cute.jit)}")
+# Read first example we can find
+for p in sorted(examples_found):
     try:
-        print(f"  cute.jit sig: {inspect.signature(cute.jit)}")
-    except Exception as e:
-        print(f"  cute.jit sig: unavailable ({e})")
-    if cute.jit.__doc__:
-        print(f"  cute.jit doc (first 400 chars):\n    {cute.jit.__doc__[:400]}")
-
-    print(f"\n  cute.compile type: {type(cute.compile)}")
-    try:
-        print(f"  cute.compile sig: {inspect.signature(cute.compile)}")
-    except Exception as e:
-        print(f"  cute.compile sig: unavailable ({e})")
-    if hasattr(cute.compile, '__doc__') and cute.compile.__doc__:
-        print(f"  cute.compile doc (first 400 chars):\n    {cute.compile.__doc__[:400]}")
-
-    # Define trivial JIT kernel
-    @cute.jit
-    def _trivial(a: cute.Tensor, b: cute.Tensor):
-        pass  # just test compilation / launch syntax
-
-    print(f"\n  Decorated fn type: {type(_trivial)}")
-    try:
-        print(f"  Decorated fn sig: {inspect.signature(_trivial)}")
+        lines = open(p).readlines()
+        if any("cute.kernel" in l or "cute.jit" in l or "launch" in l.lower() for l in lines):
+            print(f"\n── First 150 lines of: {p}\n")
+            print("".join(lines[:150]))
+            break
     except Exception:
         pass
 
-    a = torch.ones(128, device="cuda", dtype=torch.float32)
-    b = torch.zeros(128, device="cuda", dtype=torch.float32)
-    a_c = from_dlpack(a)
-    b_c = from_dlpack(b)
 
-    launch_attempts = [
-        ("grid kwarg",         lambda: _trivial(a_c, b_c, grid=(1,1,1), block=(128,1,1))),
-        ("grid_dim kwarg",     lambda: _trivial(a_c, b_c, grid_dim=(1,1,1), block_dim=(128,1,1))),
-        ("no grid",            lambda: _trivial(a_c, b_c)),
-        ("compile+call",       lambda: cute.compile(_trivial)(a_c, b_c, grid=(1,1,1), block=(128,1,1))),
-        ("compile no grid",    lambda: cute.compile(_trivial)(a_c, b_c)),
-    ]
-    for name, fn in launch_attempts:
-        try:
-            fn()
-            torch.cuda.synchronize()
-            print(f"  ✓  Launch '{name}' succeeded")
-        except Exception as e:
-            print(f"  ✗  Launch '{name}' failed: {e}")
-
-except Exception as e:
-    print(f"  ERROR in launch probe: {e}")
-
-
-# ── Look for CUTLASS Python DSL examples ─────────────────────────────────
-section("cutlass package examples / source location")
+# ── 2.  @cute.kernel  behaviour ──────────────────────────────────────────
+section("@cute.kernel — decorator type and launch syntax probe")
+print(f"  cute.kernel type: {type(cute.kernel)}")
 try:
-    import cutlass, os
-    pkg_dir = os.path.dirname(cutlass.__file__)
-    print(f"  Package dir: {pkg_dir}")
-    for root, dirs, files in os.walk(pkg_dir):
-        dirs[:] = [d for d in dirs if not d.startswith("__")]
-        for f in files:
-            if f.endswith(".py") and any(k in f.lower() for k in
-                                         ["gemm", "example", "sm100", "blackwell", "cute"]):
-                print(f"  {os.path.join(root, f)}")
-        if root.count(os.sep) - pkg_dir.count(os.sep) > 3:
-            break  # don't recurse too deep
+    print(f"  cute.kernel sig:  {inspect.signature(cute.kernel)}")
+except Exception as e:
+    print(f"  cute.kernel sig:  unavailable ({e})")
+if cute.kernel.__doc__:
+    print(f"  cute.kernel doc:\n    {cute.kernel.__doc__[:600]}")
+
+# Define a real @cute.kernel that does work
+try:
+    from cutlass.cute.arch import (
+        alloc_tmem, retrieve_tmem_ptr, dealloc_tmem,
+        relinquish_tmem_alloc_permit,
+    )
+    from cutlass.cute.nvgpu.tcgen05 import MmaF16BF16Op, CtaGroup
+    from cutlass.cute.nvgpu.tcgen05.mma import OperandSource, OperandMajorMode
+    from cutlass.cute.nvgpu.cpasync import (
+        CopyBulkTensorTileG2SOp, CopyBulkTensorTileS2GOp, make_tiled_tma_atom, tma_partition
+    )
+    from cutlass.cute.typing import Float32, BFloat16, Float16
+    print("  All imports OK")
+except Exception as e:
+    print(f"  Import failed: {e}")
+
+@cute.kernel
+def _kernel_probe(a: cute.Tensor, b: cute.Tensor):
+    bidx = cute.arch.block_idx_x()
+    val  = cute.arch.load(a[bidx])
+    cute.arch.store(b[bidx], val)
+
+print(f"\n  @cute.kernel decorated fn type: {type(_kernel_probe)}")
+try: print(f"  sig: {inspect.signature(_kernel_probe)}")
+except Exception: pass
+print(f"  dir: {[x for x in dir(_kernel_probe) if not x.startswith('__')]}")
+
+# Try launch variants
+a = torch.ones(4, device="cuda", dtype=torch.float32)
+b = torch.zeros(4, device="cuda", dtype=torch.float32)
+ac, bc = from_dlpack(a), from_dlpack(b)
+
+attempts = [
+    ("subscript [(4,1,1),(128,1,1)]",
+     lambda: _kernel_probe[(4,1,1),(128,1,1)](ac, bc)),
+    ("subscript [(4,),(128,)]",
+     lambda: _kernel_probe[(4,),(128,)](ac, bc)),
+    ("no grid",
+     lambda: _kernel_probe(ac, bc)),
+    (".launch(grid,block,args)",
+     lambda: _kernel_probe.launch((4,1,1),(128,1,1), ac, bc)
+     if hasattr(_kernel_probe, "launch") else (_ for _ in ()).throw(AttributeError("no .launch"))),
+    ("cute.compile then call",
+     lambda: cute.compile(_kernel_probe, ac, bc)(ac, bc)),
+]
+for name, fn in attempts:
+    try:
+        fn(); torch.cuda.synchronize()
+        print(f"  ✓  '{name}' succeeded")
+    except Exception as e:
+        print(f"  ✗  '{name}' failed: {type(e).__name__}: {str(e)[:120]}")
+
+
+# ── 3.  Shared memory declaration ────────────────────────────────────────
+section("Shared-memory tensor creation")
+smem_fns = ["make_smem_tensor", "make_smem_ptr", "smem_alloc",
+            "declare_smem", "extern_smem", "SharedMemory"]
+for fn_name in smem_fns:
+    val = getattr(cute, fn_name, None) or getattr(cute.arch if hasattr(cute,'arch') else None, fn_name, None)
+    print(f"  cute.{fn_name}: {'✓  ' + str(type(val)) if val else '✗  not found'}")
+
+# Check cute.arch for smem helpers
+import cutlass.cute.arch as _arch
+for a in sorted(dir(_arch)):
+    if "smem" in a.lower() or "shared" in a.lower() or "extern" in a.lower():
+        print(f"  arch.{a}: {type(getattr(_arch, a))}")
+
+# Also check cute module
+for a in sorted(dir(cute)):
+    if "smem" in a.lower() or "shared" in a.lower() or "extern" in a.lower():
+        print(f"  cute.{a}: {type(getattr(cute, a))}")
+
+
+# ── 4.  alloc_tmem  — minimal usage test ─────────────────────────────────
+section("alloc_tmem minimal usage inside @cute.jit")
+
+@cute.jit
+def _tmem_test(out: cute.Tensor):
+    """Try to allocate TMEM inside a jit function and write 1.0 to first element."""
+    from cutlass.cute.arch import alloc_tmem, retrieve_tmem_ptr, dealloc_tmem
+    tidx = cute.arch.thread_idx_x()
+    # Attempt: use a register as the address holder
+    # (In CUDA PTX, alloc_tmem writes address to smem — we need a smem ptr)
+    # Probe: what happens if we pass a tensor element's address?
+    # This will likely fail but error message will be informative
+    addr_buf = cute.make_rmem_tensor((1,), cute.arch.Int32 if hasattr(cute.arch, 'Int32') else None)
+
+try:
+    out = torch.zeros(1, device="cuda", dtype=torch.float32)
+    _tmem_test(from_dlpack(out))
+    torch.cuda.synchronize()
+    print("  _tmem_test succeeded")
+except Exception as e:
+    print(f"  _tmem_test failed: {type(e).__name__}: {str(e)[:300]}")
+
+
+# ── 5.  cutlass.cute.typing — available types ─────────────────────────────
+section("cutlass.cute.typing — available numeric types")
+try:
+    import cutlass.cute.typing as ctyping
+    for a in sorted(dir(ctyping)):
+        if not a.startswith("_"):
+            print(f"  {a}: {type(getattr(ctyping, a)).__name__}")
 except Exception as e:
     print(f"  {e}")
+
+
+# ── 6.  Any CUTLASS Python DSL higher-level examples on disk ─────────────
+section("Search nvidia_cutlass_dsl examples more broadly")
+for root, dirs, files in os.walk(DSL.parent.parent.parent):  # widen search
+    dirs[:] = [d for d in dirs if d not in [".git", "__pycache__", "node_modules"]
+               and not d.startswith(".")]
+    for f in files:
+        if f.endswith(".py") and "example" in root.lower():
+            p = os.path.join(root, f)
+            print(f"  {p}")
+    if root.count(os.sep) - str(DSL.parent.parent.parent).count(os.sep) > 5:
+        break
+
+
+# ── 7.  tcgen05.mma  MmaF16BF16Op  minimal construction test ─────────────
+section("MmaF16BF16Op construction + make_tiled_mma test")
+try:
+    from cutlass.cute.nvgpu.tcgen05 import MmaF16BF16Op
+    from cutlass.cute.nvgpu.tcgen05.mma import CtaGroup, OperandSource, OperandMajorMode
+    from cutlass.cute.typing import BFloat16, Float32
+
+    print("  CtaGroup values:", list(CtaGroup))
+    print("  OperandSource values:", list(OperandSource))
+    print("  OperandMajorMode values:", list(OperandMajorMode))
+
+    # Try to construct the MMA op
+    for shape in [(64, 128, 16), (128, 128, 16), (64, 256, 16)]:
+        try:
+            op = MmaF16BF16Op(
+                ab_dtype=BFloat16,
+                acc_dtype=Float32,
+                instruction_shape=shape,
+                cta_group=CtaGroup.One,
+                a_src=OperandSource.SMEM,
+                a_major_mode=OperandMajorMode.K,
+                b_major_mode=OperandMajorMode.K,
+            )
+            tiled = cute.make_tiled_mma(op)
+            print(f"  ✓  MmaF16BF16Op{shape} + make_tiled_mma  OK  → {type(tiled)}")
+            break
+        except Exception as e:
+            print(f"  ✗  MmaF16BF16Op{shape}: {str(e)[:100]}")
+
+    # Try MmaTF32Op
+    from cutlass.cute.nvgpu.tcgen05 import MmaTF32Op
+    for shape in [(64, 128, 8), (128, 128, 8), (64, 256, 8)]:
+        try:
+            op = MmaTF32Op(
+                instruction_shape=shape,
+                cta_group=CtaGroup.One,
+                a_src=OperandSource.SMEM,
+                a_major_mode=OperandMajorMode.K,
+                b_major_mode=OperandMajorMode.K,
+            )
+            tiled = cute.make_tiled_mma(op)
+            print(f"  ✓  MmaTF32Op{shape} + make_tiled_mma  OK  → {type(tiled)}")
+            break
+        except Exception as e:
+            print(f"  ✗  MmaTF32Op{shape}: {str(e)[:100]}")
+
+except Exception as e:
+    print(f"  ERROR: {e}")
 
 
 print(f"\n{SEP}\n  Done.\n{SEP}")
