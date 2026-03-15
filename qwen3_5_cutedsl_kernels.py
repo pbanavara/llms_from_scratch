@@ -63,19 +63,28 @@ try:
 except ImportError:
     _TRITON_OK = False
 
-# CUTE-DSL: requires nvidia-cutlass with SM100 support
+# CUTE-DSL: requires nvidia-cutlass with SM100 support.
+# Atom locations confirmed by cutlass_probe.py on CUTLASS 4.4.1 / SM100:
+#   TMEM  → cutlass.cute.arch   (alloc_tmem, retrieve_tmem_ptr, dealloc_tmem)
+#   MMA   → cutlass.cute.nvgpu.tcgen05  (MmaF16BF16Op / MmaTF32Op)
+#   TMA   → cutlass.cute.nvgpu.cpasync  (CopyBulkTensorTileG2SOp)
+#   S2T   → cutlass.cute.nvgpu.tcgen05  (make_s2t_copy)
 _CUTE_IMPORT_ERROR: str = ""
 try:
-    import cutlass.cute as cute                                    # noqa: F401
-    from cutlass.cute.runtime import from_dlpack as cute_from_dlpack  # noqa: F401
-    # Import SM100 atoms — names confirmed by running cutlass_probe.py.
-    # If this block fails, run:  python cutlass_probe.py
-    # and update the names below to match your CUTLASS version.
-    from cutlass.cute.arch import (          # noqa: F401
-        SM100_TMA_LOAD,
-        SM100_TMA_STORE,
-        SM100_MMA_F32F32F32F32_SS_1CTA,
-        SM100_TMEM_ALLOC,
+    import cutlass.cute as cute                                          # noqa: F401
+    from cutlass.cute.runtime import from_dlpack as cute_from_dlpack    # noqa: F401
+    from cutlass.cute.arch import (                                      # noqa: F401
+        alloc_tmem, retrieve_tmem_ptr, dealloc_tmem,
+        relinquish_tmem_alloc_permit,
+        fence_view_async_tmem_load, fence_view_async_tmem_store,
+    )
+    from cutlass.cute.nvgpu.tcgen05 import (                            # noqa: F401
+        MmaF16BF16Op, MmaTF32Op,
+        make_s2t_copy, make_tmem_copy,
+    )
+    from cutlass.cute.nvgpu.cpasync import (                            # noqa: F401
+        CopyBulkTensorTileG2SOp, CopyBulkTensorTileS2GOp,
+        make_tiled_tma_atom, tma_partition,
     )
     _CUTE_OK = _IS_B200
 except Exception as _e:
@@ -83,7 +92,7 @@ except Exception as _e:
     _CUTE_IMPORT_ERROR = str(_e)
     if _IS_B200:
         print(f"[qwen3_5_cutedsl] CUTE-DSL unavailable: {_e}")
-        print("[qwen3_5_cutedsl] Run `python cutlass_probe.py` to find correct atom names.")
+        print("[qwen3_5_cutedsl] Run `python cutlass_probe.py` for details.")
 
 
 # ── utilities ──────────────────────────────────────────────────────────────
